@@ -77,7 +77,6 @@ class SIR(torch.nn.Module):
         infected, susceptible, recovered = x[-1]  ## store the states for each agent
         # Get number of infected neighbors per node, return 0 if node is not susceptible.
         n_infected_neighbors = self.mp(self.graph.edge_index, infected, susceptible)
-        n_recovered_neighbors = self.mp(self.graph.edge_index, recovered, infected)
         n_neighbors = self.mp(
             self.graph.edge_index,
             self.aux,
@@ -91,16 +90,12 @@ class SIR(torch.nn.Module):
         # sample the infected nodes
         new_infected = self.sample_bernoulli_gs(prob_infection)
 
-        prob_recovery = 1.0 - torch.exp(
-            - gamma - n_recovered_neighbors / n_neighbors * self.delta_t
-        )
+        prob_recovery = gamma * infected
         prob_recovery = torch.clip(prob_recovery, min=1e-10, max=1.0)
         # sample recoverd people
         new_recovered = self.sample_bernoulli_gs(prob_recovery)
 
-        prob_relapse = 1.0 - torch.exp(
-            - rho - n_infected_neighbors / n_neighbors * self.delta_t
-        )
+        prob_relapse = rho * recovered
         prob_relapse = torch.clip(prob_relapse, min=1e-10, max=1.0)
         # sample relapsed people
         new_relapsed = self.sample_bernoulli_gs(prob_relapse)
