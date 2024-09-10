@@ -75,37 +75,31 @@ class SIR(torch.nn.Module):
         - x: a tensor of shape (3, n_agents) containing the infected, susceptible, and recovered counts.
         """
         infected, susceptible, recovered = x[-1]  ## store the states for each agent
-        # Get number of infected neighbors per node, return 0 if node is not susceptible.
+        # Get number of infected neighbors per node, return 0 if node is infected already.
         n_infected_neighbors = self.mp(self.graph.edge_index, infected, 1 - infected)
         n_neighbors = self.mp(
             self.graph.edge_index,
             self.aux,
             self.aux
         )
-        # each contact has a chance of infecting a susceptible node
-        prob_infection = 1.0 - torch.exp(
-            -susceptible * n_infected_neighbors / n_neighbors * self.delta_t
-        )
-        prob_infection = torch.clip(prob_infection, min=1e-10, max=1.0)
-        # sample the infected nodes
-        new_infected = self.sample_bernoulli_gs(prob_infection)
+        lambda_1 = susceptible
+        lambda_2 = rho * recovered
+        lambda_ = (lambda_1 + lambda_2) * n_infected_neighbors / n_neighbors * self.delta_t
+        # each contact has a chance of infecting a susceptible or recovered node
+        prob_infected_or_relapsed = 1.0 - torch.exp(-lambda_)
+        prob_infected_or_relapsed = torch.clip(prob_infected_or_relapsed, min=1e-10, max=1.0)
+        # sample the infected and relapsed nodes
+        new_infected_and_relapsed = self.sample_bernoulli_gs(prob_infected_or_relapsed)
 
         prob_recovery = gamma * infected
         prob_recovery = torch.clip(prob_recovery, min=1e-10, max=1.0)
         # sample recoverd people
         new_recovered = self.sample_bernoulli_gs(prob_recovery)
 
-        prob_relapse = 1.0 - torch.exp(
-            -rho * recovered * n_infected_neighbors / n_neighbors * self.delta_t
-        )
-        prob_relapse = torch.clip(prob_relapse, min=1e-10, max=1.0)
-        # sample relapsed people
-        new_relapsed = self.sample_bernoulli_gs(prob_relapse)
-
         # update the state of the agents
-        infected = infected + new_infected + new_relapsed - new_recovered
-        susceptible = susceptible - new_infected
-        recovered = recovered + new_recovered - new_relapsed
+        infected = infected + new_infected_and_relapsed - new_recovered
+        susceptible = susceptible - (susceptible * new_infected_and_relapsed)
+        recovered = recovered + new_recovered - (recovered * new_infected_and_relapsed)
         x = torch.vstack((infected, susceptible, recovered)).reshape(1, 3, -1)
         return x
 
