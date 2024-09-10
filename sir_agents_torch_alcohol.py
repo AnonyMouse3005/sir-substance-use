@@ -76,7 +76,7 @@ class SIR(torch.nn.Module):
         """
         infected, susceptible, recovered = x[-1]  ## store the states for each agent
         # Get number of infected neighbors per node, return 0 if node is not susceptible.
-        n_infected_neighbors = self.mp(self.graph.edge_index, infected, susceptible)
+        n_infected_neighbors = self.mp(self.graph.edge_index, infected, 1 - infected)
         n_neighbors = self.mp(
             self.graph.edge_index,
             self.aux,
@@ -84,7 +84,7 @@ class SIR(torch.nn.Module):
         )
         # each contact has a chance of infecting a susceptible node
         prob_infection = 1.0 - torch.exp(
-            - n_infected_neighbors / n_neighbors * self.delta_t
+            -susceptible * n_infected_neighbors / n_neighbors * self.delta_t
         )
         prob_infection = torch.clip(prob_infection, min=1e-10, max=1.0)
         # sample the infected nodes
@@ -95,7 +95,9 @@ class SIR(torch.nn.Module):
         # sample recoverd people
         new_recovered = self.sample_bernoulli_gs(prob_recovery)
 
-        prob_relapse = rho * recovered
+        prob_relapse = 1.0 - torch.exp(
+            -rho * recovered * n_infected_neighbors / n_neighbors * self.delta_t
+        )
         prob_relapse = torch.clip(prob_relapse, min=1e-10, max=1.0)
         # sample relapsed people
         new_relapsed = self.sample_bernoulli_gs(prob_relapse)
@@ -191,7 +193,7 @@ if __name__ == "__main__":
 
     if np.isnan(params.gamma) or np.isnan(params.rho):
         gamma_list = np.arange(0, 0.51, 0.05)
-        rho_list = np.arange(0, 0.51, 0.05)
+        rho_list = np.arange(0, 0.76, 0.05)
     else:
         gamma_list, rho_list = [params.gamma], [params.rho]
 
