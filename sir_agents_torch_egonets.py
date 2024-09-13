@@ -117,6 +117,7 @@ class SIR(torch.nn.Module):
             x[:, 0, :].sum(1) / self.n_agents,
             x[:, 1, :].sum(1) / self.n_agents,
             x[:, 2, :].sum(1) / self.n_agents,
+            torch.argmax(torch.squeeze(x), dim=0).reshape(1, -1),  ## state S, I, R takes value of 1, 0, 2, respectively
             transform(self.graph)
         ]
 
@@ -130,18 +131,19 @@ class SIR(torch.nn.Module):
         """
         gamma, rho, initial_fraction_infected = params
         x = self.initialize(initial_fraction_infected)
-        infected_per_day, susceptible_per_day, recovered_per_day, ego_nets = self.observe(x)
+        infected_per_day, susceptible_per_day, recovered_per_day, states_per_day, ego_nets = self.observe(x)
         ego_nets_per_day = [ego_nets]
         # Example instance: RootedSubgraphData(edge_index=[2, 10000], num_nodes=1000, sub_edge_index=[2, 78452], n_id=[11000], e_id=[78452], n_sub_batch=[11000], e_sub_batch=[78452])
         for i in range(self.n_timesteps):
             x = self.step(gamma, rho, x)
             # get the observations
-            infected, susceptible, recovered, ego_nets = self.observe(x)
+            infected, susceptible, recovered, states, ego_nets = self.observe(x)
             infected_per_day = torch.cat((infected_per_day, infected))
             susceptible_per_day = torch.cat((susceptible_per_day, susceptible))
             recovered_per_day = torch.cat((recovered_per_day, recovered))
+            states_per_day = torch.cat((states_per_day, states))
             ego_nets_per_day.append(ego_nets)
-        return susceptible_per_day, infected_per_day, recovered_per_day, ego_nets_per_day
+        return susceptible_per_day, infected_per_day, recovered_per_day, states_per_day, ego_nets_per_day
 
 
 class SIRMessagePassing(torch_geometric.nn.conv.MessagePassing):
@@ -177,9 +179,19 @@ def get_ego_net(ego_nets, ego_id):
     return networkx.relabel_nodes(g, {i: v for i, v in enumerate(node_ids.numpy())})
 
 
-def mark_ego_node(G, ego_id):
-    color_map = np.array(['tab:blue'] * G.number_of_nodes())
-    color_map[np.array(list(G.nodes)) == ego_id] = 'tab:red'
+def mark_nodes(G, ego_id, states):
+    color_map = []
+    for i, v in enumerate(list(G.nodes)):
+        if v == ego_id:
+            color_map.append('tab:red')
+        else:
+            if states[i] == 1.0:  # susceptible
+                color_map.append('tab:blue')
+            elif states[i] == 2.0:  # recovered
+                color_map.append('tab:green')
+            else:  # infected
+                color_map.append('tab:orange')
+
     return color_map
 
 
@@ -217,7 +229,7 @@ if __name__ == "__main__":
                 graph, params.n_timesteps, params.n_agents, params.device, params.delta_t
             )
             t1 = time()
-            S, I, R, ego_nets = model(
+            S, I, R, states, ego_nets = model(
                 torch.tensor([gamma, rho, params.initial_fraction_infected])
             )
             t2 = time()
@@ -240,11 +252,14 @@ if __name__ == "__main__":
             a_i = 1
             g_start = get_ego_net(ego_nets[0], a_i)
             g_end = get_ego_net(ego_nets[-1], a_i)
+            states = states.cpu()
 
             fig, axs = plt.subplots(1, 2, figsize=(10, 5), facecolor='white')
             networkx.draw(g_start, networkx.spring_layout(g_start, seed=3113794652),
-                          node_color=mark_ego_node(g_start, a_i), with_labels=True, ax = axs[0])
+                          node_color=mark_nodes(g_start, a_i, states[0, list(g_start.nodes)]),
+                          with_labels=True, ax = axs[0])
             networkx.draw(g_end, networkx.spring_layout(g_end, seed=3113794652),
-                          node_color=mark_ego_node(g_end, a_i), with_labels=True, ax = axs[1])
+                          node_color=mark_nodes(g_end, a_i, states[-1, list(g_end.nodes)]),
+                          with_labels=True, ax = axs[1])
             plt.tight_layout()
             plt.savefig(f"./figures/gorman/alcohol_agents_gamma{int(gamma*100):03d}_rho{int(rho*100):03d}_egonet.png", dpi=150)
