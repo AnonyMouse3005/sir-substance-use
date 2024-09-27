@@ -185,9 +185,9 @@ def mark_nodes(G, ego_id, states):
         if v == ego_id:
             color_map.append('tab:red')
         else:
-            if states[i] == 1.0:  # susceptible
+            if states[i] == 1:  # susceptible
                 color_map.append('tab:blue')
-            elif states[i] == 2.0:  # recovered
+            elif states[i] == 2:  # recovered
                 color_map.append('tab:green')
             else:  # infected
                 color_map.append('tab:orange')
