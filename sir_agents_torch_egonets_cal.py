@@ -4,6 +4,7 @@ import torch_geometric
 import torch_sparse
 import numpy as np
 
+from blackbirds.utils import soft_minimum
 from loss import MMD
 
 
@@ -48,7 +49,7 @@ class SIR(torch.nn.Module):
         gs_samples = torch.nn.functional.gumbel_softmax(logits, tau=tau, hard=True)
         return gs_samples[:, 0]
 
-    def initialize(self, initial_fraction_infected):
+    def initialize(self, params):
         """
         Initializes the model setting the adequate number of initial infections.
 
@@ -56,6 +57,8 @@ class SIR(torch.nn.Module):
 
         - `initial_fraction_infected`: the fraction of infected agents at the beginning of the simulation
         """
+        params = soft_minimum(params, torch.tensor(0.0, device=params.device), 2)
+        initial_fraction_infected = 10**params[2]
         n_agents = self.graph.num_nodes
         # sample the initial infected nodes
         probs = initial_fraction_infected * torch.ones(n_agents, device=self.device)
@@ -67,7 +70,7 @@ class SIR(torch.nn.Module):
         x = torch.vstack((infected, susceptible, recovered))
         return x.reshape(1, 3, n_agents)
 
-    def step(self, gamma, rho, x: torch.Tensor):
+    def step(self, params, x: torch.Tensor):
         """
         Runs the model forward for one timestep.
 
@@ -77,6 +80,9 @@ class SIR(torch.nn.Module):
         - `rho`: the relapse probability
         - x: a tensor of shape (3, n_agents) containing the infected, susceptible, and recovered counts.
         """
+        params = soft_minimum(params, torch.tensor(0.0, device=params.device), 2)
+        params = 10**params
+        gamma, rho, _ = params
         infected, susceptible, recovered = x[-1]  ## store the states for each agent
         # Get number of infected neighbors per node, return 0 if node is infected already.
         n_infected_neighbors = self.mp(self.graph.edge_index, infected, 1 - infected)
@@ -131,13 +137,12 @@ class SIR(torch.nn.Module):
 
         - params: a tensor of shape (2,) containing the gamma and rho parameters
         """
-        gamma, rho, initial_fraction_infected = params
-        x = self.initialize(initial_fraction_infected)
+        x = self.initialize(params)
         infected_per_day, susceptible_per_day, recovered_per_day, states_per_day, ego_nets = self.observe(x)
         ego_nets_per_day = [ego_nets]
         # Example instance: RootedSubgraphData(edge_index=[2, 10000], num_nodes=1000, sub_edge_index=[2, 78452], n_id=[11000], e_id=[78452], n_sub_batch=[11000], e_sub_batch=[78452])
         for t in range(self.n_timesteps):
-            x = self.step(gamma, rho, x)
+            x = self.step(params, x)
             # get the observations
             infected, susceptible, recovered, states, ego_nets = self.observe(x)
             infected_per_day = torch.cat((infected_per_day, infected))
@@ -189,13 +194,12 @@ def simulate_and_observe_model(
     - `params`: The parameters taken by the model's `forward` method.
     - `data`: True data to compare against.
     """
-    gamma, rho, initial_fraction_infected = params
-    x = model.initialize(initial_fraction_infected)
+    x = model.initialize(params)
     _, _, _, states, ego_nets = model.observe(x)
     loss_per_day = torch.zeros(model.n_timesteps + 1)
     loss_per_day[0] = loss_fn(get_ego_net(ego_nets, states, agent_sample), get_ego_net(data[4][0], data[3][0], agent_sample))
     for t in range(model.n_timesteps):
-        x = model.step(gamma, rho, x)
+        x = model.step(params, x)
         # get the observations
         _, _, _, states, ego_nets = model.observe(x)
         loss_per_day[t+1] = loss_fn(get_ego_net(ego_nets, states, agent_sample), get_ego_net(data[4][t+1], data[3][t+1], agent_sample))
