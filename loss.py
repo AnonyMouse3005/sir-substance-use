@@ -1,7 +1,8 @@
 import torch
 from grakel.kernels import WeisfeilerLehman, VertexHistogram
 from grakel.utils import graph_from_networkx
-
+# TODO: see PyG version https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.nn.conv.WLConvContinuous.html
+# see Theorem 5 in https://arxiv.org/pdf/1906.01277 for computing kernel from WLConvContinuous
 
 class MMD(torch.nn.Module):
 

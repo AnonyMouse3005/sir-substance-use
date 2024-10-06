@@ -163,3 +163,4 @@ Manifest.toml
 # experiments with sir-substance-use
 runs/
 *.pt
+*.prof

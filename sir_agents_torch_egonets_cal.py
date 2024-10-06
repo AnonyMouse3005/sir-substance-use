@@ -5,7 +5,6 @@ import torch_sparse
 import numpy as np
 
 from blackbirds.utils import soft_minimum
-from loss import MMD
 
 
 class SIR(torch.nn.Module):
@@ -82,7 +81,7 @@ class SIR(torch.nn.Module):
         """
         params = soft_minimum(params, torch.tensor(0.0, device=params.device), 2)
         params = 10**params
-        gamma, rho, _ = params
+        gamma, rho, _, _, _, _, _ = params
         infected, susceptible, recovered = x[-1]  ## store the states for each agent
         # Get number of infected neighbors per node, return 0 if node is infected already.
         n_infected_neighbors = self.mp(self.graph.edge_index, infected, 1 - infected)
@@ -125,7 +124,7 @@ class SIR(torch.nn.Module):
             x[:, 0, :].sum(1) / self.n_agents,
             x[:, 1, :].sum(1) / self.n_agents,
             x[:, 2, :].sum(1) / self.n_agents,
-            torch.argmax(torch.squeeze(x), dim=0).reshape(1, -1),  ## state S, I, R takes value of 1, 0, 2, respectively
+            torch.add(torch.argmax(torch.squeeze(x), dim=0), 1).reshape(1, -1),  ## state S, I, R takes value of 1, 0, 2, respectively
             transform(self.graph)
         ]
 
@@ -150,7 +149,31 @@ class SIR(torch.nn.Module):
             recovered_per_day = torch.cat((recovered_per_day, recovered))
             states_per_day = torch.cat((states_per_day, states))
             ego_nets_per_day.append(ego_nets)
+            self.update_net(params, states[0])
         return susceptible_per_day, infected_per_day, recovered_per_day, states_per_day, ego_nets_per_day
+
+    def update_net(self, params, states):
+        """
+        Rules for network dynamics.
+
+        **Arguments**:
+
+        - `alpha1`, `alpha2`: the edge deletion probability for same- and different-state agents, respectively
+        - `beta1`, `beta2`: the edge formation probability for same- and different-state agents, respectively
+        """
+        params = soft_minimum(params, torch.tensor(0.0, device=params.device), 2)
+        params = 10**params
+        _, _, _, alpha1, alpha2, beta1, beta2 = params
+
+        edges = self.graph.edge_index
+        prob_edge_rm = torch.where(torch.eq(states[edges[0]], states[edges[1]]), alpha1, alpha2)
+        edge_removed = self.sample_bernoulli_gs(prob_edge_rm)
+
+        # sample |E| negative (non-existent) edges in the current graph
+        non_edges = torch_geometric.utils.negative_sampling(edges)
+        prob_edge_add = torch.where(torch.eq(states[non_edges[0]], states[non_edges[1]]), beta1, beta2)
+        edge_added = self.sample_bernoulli_gs(prob_edge_add)
+        self.graph.edge_index = torch.cat([edges[:, edge_removed != 1], non_edges[:, edge_added == 1]], dim=1)
 
 
 class SIRMessagePassing(torch_geometric.nn.conv.MessagePassing):
