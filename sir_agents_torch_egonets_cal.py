@@ -149,31 +149,47 @@ class SIR(torch.nn.Module):
             recovered_per_day = torch.cat((recovered_per_day, recovered))
             states_per_day = torch.cat((states_per_day, states))
             ego_nets_per_day.append(ego_nets)
-            self.update_net(params, states[0])
+            self.update_graph(params, torch.squeeze(states))
         return susceptible_per_day, infected_per_day, recovered_per_day, states_per_day, ego_nets_per_day
 
-    def update_net(self, params, states):
+    def update_graph(self, params, states):
         """
         Rules for network dynamics.
+        NOTE: Because each edge in PyG's undirected graph is bidirectional i.e., both (u -> v) and (v -> u) included,
+        only do sampling for edge deletion and addition in one direction (hence over |E|, not |E| x 2),
+        then call ToUndirected() at the end so the graph has |E| x 2 edges again.
 
         **Arguments**:
 
         - `alpha1`, `alpha2`: the edge deletion probability for same- and different-state agents, respectively
-        - `beta1`, `beta2`: the edge formation probability for same- and different-state agents, respectively
+        - `beta1`, `beta2`: the edge addition probability for same- and different-state agents, respectively
         """
         params = soft_minimum(params, torch.tensor(0.0, device=params.device), 2)
         params = 10**params
         _, _, _, alpha1, alpha2, beta1, beta2 = params
 
-        edges = self.graph.edge_index
-        prob_edge_rm = torch.where(torch.eq(states[edges[0]], states[edges[1]]), alpha1, alpha2)
-        edge_removed = self.sample_bernoulli_gs(prob_edge_rm)
+        edges_all = self.graph.edge_index
+        n_edges = edges_all.size(dim=1)
+        if n_edges > 0:
+            edges = edges_all[:, edges_all[0] < edges_all[1]]  # NOTE: PyG's "undirected" graphs have |E| x 2 edges in effect
+            prob_edge_rm = torch.where(torch.eq(states[edges[0]], states[edges[1]]), alpha1, alpha2)
+            prob_edge_rm = torch.clip(prob_edge_rm, min=1e-10, max=1.0)
+            edge_removed = self.sample_bernoulli_gs(prob_edge_rm)
+            self.graph.edge_index = edges[:, edge_removed != 1]
+        else:
+            edges_all = torch.arange(self.n_agents).repeat(2, 1)  #TODO: how many edges to add? depending on the amount of removed edges?
 
         # sample |E| negative (non-existent) edges in the current graph
-        non_edges = torch_geometric.utils.negative_sampling(edges)
+        non_edges = torch_geometric.utils.negative_sampling(edges_all, num_nodes=self.n_agents, force_undirected=True)
+        non_edges = non_edges[:, :n_edges // 2]
         prob_edge_add = torch.where(torch.eq(states[non_edges[0]], states[non_edges[1]]), beta1, beta2)
+        prob_edge_add = torch.clip(prob_edge_add, min=1e-10, max=1.0)
         edge_added = self.sample_bernoulli_gs(prob_edge_add)
-        self.graph.edge_index = torch.cat([edges[:, edge_removed != 1], non_edges[:, edge_added == 1]], dim=1)
+        self.graph.edge_index = torch.cat([self.graph.edge_index, non_edges[:, edge_added == 1]], dim=1)
+        # print('before', self.graph, torch_geometric.utils.is_undirected(self.graph.edge_index))
+        transform = torch_geometric.transforms.ToUndirected()
+        self.graph = transform(self.graph)
+        # print('after', self.graph, torch_geometric.utils.is_undirected(self.graph.edge_index))
 
 
 class SIRMessagePassing(torch_geometric.nn.conv.MessagePassing):
@@ -226,6 +242,7 @@ def simulate_and_observe_model(
         # get the observations
         _, _, _, states, ego_nets = model.observe(x)
         loss_per_day[t+1] = loss_fn(get_ego_net(ego_nets, states, agent_sample), get_ego_net(data[4][t+1], data[3][t+1], agent_sample))
+        model.update_graph(params, torch.squeeze(states))
 
     return loss_per_day.sum()
 
