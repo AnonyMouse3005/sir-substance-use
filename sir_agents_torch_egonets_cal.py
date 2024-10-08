@@ -1,6 +1,8 @@
 import torch
 import networkx
 import torch_geometric
+import torch_geometric.transforms
+from torch_geometric.utils import dropout_edge, add_random_edge, sort_edge_index
 import torch_sparse
 import numpy as np
 
@@ -124,7 +126,7 @@ class SIR(torch.nn.Module):
             x[:, 0, :].sum(1) / self.n_agents,
             x[:, 1, :].sum(1) / self.n_agents,
             x[:, 2, :].sum(1) / self.n_agents,
-            torch.add(torch.argmax(torch.squeeze(x), dim=0), 1).reshape(1, -1),  ## state S, I, R takes value of 1, 0, 2, respectively
+            torch.argmax(torch.squeeze(x), dim=0).reshape(1, -1),  ## state S, I, R takes value of 1, 0, 2, respectively
             transform(self.graph)
         ]
 
@@ -168,28 +170,26 @@ class SIR(torch.nn.Module):
         params = 10**params
         _, _, _, alpha1, alpha2, beta1, beta2 = params
 
-        edges_all = self.graph.edge_index
-        n_edges = edges_all.size(dim=1)
-        if n_edges > 0:
-            edges = edges_all[:, edges_all[0] < edges_all[1]]  # NOTE: PyG's "undirected" graphs have |E| x 2 edges in effect
-            prob_edge_rm = torch.where(torch.eq(states[edges[0]], states[edges[1]]), alpha1, alpha2)
-            prob_edge_rm = torch.clip(prob_edge_rm, min=1e-10, max=1.0)
-            edge_removed = self.sample_bernoulli_gs(prob_edge_rm)
-            self.graph.edge_index = edges[:, edge_removed != 1]
-        else:
-            edges_all = torch.arange(self.n_agents).repeat(2, 1)  #TODO: how many edges to add? depending on the amount of removed edges?
+        mean_degree = 0.5 * self.graph.num_edges / self.graph.num_nodes
+        edges = self.graph.edge_index
+        mask_same_state = torch.eq(states[edges[0]], states[edges[1]])
+        edges_same_state = edges[:, mask_same_state]
+        edges_diff_state = edges[:, ~mask_same_state]
+        if edges_same_state.size(0) > 0:
+            retained_edges_same_state, _ = dropout_edge(edges_same_state,p=fix_prob(alpha1.item(), 10, mean_degree, 'rm'),
+                                                        force_undirected=True)
+        if edges_diff_state.size(0) > 0:
+            retained_edges_diff_state, _ = dropout_edge(edges_diff_state, p=fix_prob(alpha2.item(), 10, mean_degree, 'rm'),
+                                                        force_undirected=True)
+        # TODO: this will always add more edges than what was removed. so beta's should be set lower than alpha's if the goal is stability
+        _, new_edges_same_state = add_random_edge(edges_same_state, p=fix_prob(beta1.item(), 10, mean_degree, 'add'),
+                                                  force_undirected=True, num_nodes=self.n_agents)
+        _, new_edges_diff_state = add_random_edge(edges_diff_state, p=fix_prob(beta2.item(), 10, mean_degree, 'add'),
+                                                  force_undirected=True, num_nodes=self.n_agents)
 
-        # sample |E| negative (non-existent) edges in the current graph
-        non_edges = torch_geometric.utils.negative_sampling(edges_all, num_nodes=self.n_agents, force_undirected=True)
-        non_edges = non_edges[:, :n_edges // 2]
-        prob_edge_add = torch.where(torch.eq(states[non_edges[0]], states[non_edges[1]]), beta1, beta2)
-        prob_edge_add = torch.clip(prob_edge_add, min=1e-10, max=1.0)
-        edge_added = self.sample_bernoulli_gs(prob_edge_add)
-        self.graph.edge_index = torch.cat([self.graph.edge_index, non_edges[:, edge_added == 1]], dim=1)
-        # print('before', self.graph, torch_geometric.utils.is_undirected(self.graph.edge_index))
-        transform = torch_geometric.transforms.ToUndirected()
-        self.graph = transform(self.graph)
-        # print('after', self.graph, torch_geometric.utils.is_undirected(self.graph.edge_index))
+        self.graph.edge_index = sort_edge_index(torch.cat([retained_edges_same_state, retained_edges_diff_state,
+                                                           new_edges_same_state, new_edges_diff_state], dim=1))
+        self.graph = torch_geometric.transforms.RemoveDuplicatedEdges()(self.graph)
 
 
 class SIRMessagePassing(torch_geometric.nn.conv.MessagePassing):
@@ -261,6 +261,13 @@ def get_ego_net(ego_nets, states, agent_sample):
         networkx.set_node_attributes(g, {j: state for j, state in enumerate(map_states(torch.squeeze(states)[node_ids]))}, "state")
         G.append(g)
     return G
+
+
+def fix_prob(p, init_mean_degree, current_mean_degree, mode):
+    if mode == 'add':
+        return np.clip(p/np.emath.logn(init_mean_degree, current_mean_degree), 1e-10, 1.0)
+    elif mode == 'rm':
+        return np.clip(-p/np.emath.logn(init_mean_degree, current_mean_degree) + 2*p, 1e-10, 1.0)
 
 
 if __name__ == "__main__":
