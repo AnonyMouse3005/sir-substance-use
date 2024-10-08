@@ -2,7 +2,7 @@ import torch
 import networkx
 import torch_geometric
 import torch_geometric.transforms
-from torch_geometric.utils import dropout_edge, add_random_edge, sort_edge_index
+from torch_geometric.utils import dropout_edge, add_random_edge, degree, sort_edge_index
 import torch_sparse
 import numpy as np
 
@@ -33,6 +33,7 @@ class SIR(torch.nn.Module):
         self.delta_t = delta_t
         # convert graph from networkx to pytorch geometric
         self.graph = torch_geometric.utils.convert.from_networkx(graph).to(device)
+        self.init_mean_degree = torch.mean(degree(self.graph.edge_index[0]))
         self.mp = SIRMessagePassing(aggr="add", node_dim=-1)
         self.aux = torch.ones(self.n_agents, device=device)
         self.device = device
@@ -87,11 +88,11 @@ class SIR(torch.nn.Module):
         infected, susceptible, recovered = x[-1]  ## store the states for each agent
         # Get number of infected neighbors per node, return 0 if node is infected already.
         n_infected_neighbors = self.mp(self.graph.edge_index, infected, 1 - infected)
-        n_neighbors = self.mp(
+        n_neighbors = max(1.0, self.mp(  # NOTE: in case a node has no neighbors
             self.graph.edge_index,
             self.aux,
             self.aux
-        )
+        ))
         lambda_1 = susceptible
         lambda_2 = rho * recovered
         lambda_ = (lambda_1 + lambda_2) * n_infected_neighbors / n_neighbors * self.delta_t
@@ -157,9 +158,6 @@ class SIR(torch.nn.Module):
     def update_graph(self, params, states):
         """
         Rules for network dynamics.
-        NOTE: Because each edge in PyG's undirected graph is bidirectional i.e., both (u -> v) and (v -> u) included,
-        only do sampling for edge deletion and addition in one direction (hence over |E|, not |E| x 2),
-        then call ToUndirected() at the end so the graph has |E| x 2 edges again.
 
         **Arguments**:
 
@@ -170,26 +168,26 @@ class SIR(torch.nn.Module):
         params = 10**params
         _, _, _, alpha1, alpha2, beta1, beta2 = params
 
-        mean_degree = 0.5 * self.graph.num_edges / self.graph.num_nodes
         edges = self.graph.edge_index
+        mean_degree = torch.mean(degree(edges[0]))
         mask_same_state = torch.eq(states[edges[0]], states[edges[1]])
         edges_same_state = edges[:, mask_same_state]
         edges_diff_state = edges[:, ~mask_same_state]
         if edges_same_state.size(0) > 0:
-            retained_edges_same_state, _ = dropout_edge(edges_same_state,p=fix_prob(alpha1.item(), 10, mean_degree, 'rm'),
-                                                        force_undirected=True)
+            retained_edges_same_state, _ = dropout_edge(edges_same_state, force_undirected=True,
+                                                        p=fix_prob(alpha1.item(), self.init_mean_degree, mean_degree, 'rm'))
         if edges_diff_state.size(0) > 0:
-            retained_edges_diff_state, _ = dropout_edge(edges_diff_state, p=fix_prob(alpha2.item(), 10, mean_degree, 'rm'),
-                                                        force_undirected=True)
-        # TODO: this will always add more edges than what was removed. so beta's should be set lower than alpha's if the goal is stability
-        _, new_edges_same_state = add_random_edge(edges_same_state, p=fix_prob(beta1.item(), 10, mean_degree, 'add'),
-                                                  force_undirected=True, num_nodes=self.n_agents)
-        _, new_edges_diff_state = add_random_edge(edges_diff_state, p=fix_prob(beta2.item(), 10, mean_degree, 'add'),
-                                                  force_undirected=True, num_nodes=self.n_agents)
+            retained_edges_diff_state, _ = dropout_edge(edges_diff_state, force_undirected=True,
+                                                        p=fix_prob(alpha2.item(), self.init_mean_degree, mean_degree, 'rm'))
+
+        _, new_edges_same_state = add_random_edge(edges_same_state, force_undirected=True, num_nodes=self.n_agents,
+                                                  p=fix_prob(beta1.item(), self.init_mean_degree, mean_degree, 'add'))
+        _, new_edges_diff_state = add_random_edge(edges_diff_state, force_undirected=True, num_nodes=self.n_agents,
+                                                  p=fix_prob(beta2.item(), self.init_mean_degree, mean_degree, 'add'))
 
         self.graph.edge_index = sort_edge_index(torch.cat([retained_edges_same_state, retained_edges_diff_state,
                                                            new_edges_same_state, new_edges_diff_state], dim=1))
-        self.graph = torch_geometric.transforms.RemoveDuplicatedEdges()(self.graph)
+        self.graph = torch_geometric.transforms.RemoveDuplicatedEdges()(self.graph)  # TODO: why are there duplicated edges?
 
 
 class SIRMessagePassing(torch_geometric.nn.conv.MessagePassing):
