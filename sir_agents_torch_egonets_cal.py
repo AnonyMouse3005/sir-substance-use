@@ -88,7 +88,7 @@ class SIR(torch.nn.Module):
         infected, susceptible, recovered = x[-1]  ## store the states for each agent
         # Get number of infected neighbors per node, return 0 if node is infected already.
         n_infected_neighbors = self.mp(self.graph.edge_index, infected, 1 - infected)
-        n_neighbors = max(1.0, self.mp(  # NOTE: in case a node has no neighbors
+        n_neighbors = torch.maximum(torch.ones(self.n_agents), self.mp(  # NOTE: in case a node has no neighbors
             self.graph.edge_index,
             self.aux,
             self.aux
